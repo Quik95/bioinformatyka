@@ -1,0 +1,27 @@
+<dna key="2071316" length="16" start="TATTTGG">
+	<probe pattern="NXNXNXN">
+		<cell>AXAXCXG</cell>
+		<cell>AXCXGXG</cell>
+		<cell>AXTXGXA</cell>
+		<cell>GXAXAXC</cell>
+		<cell>GXTXGXT</cell>
+		<cell>TXGXAXA</cell>
+		<cell>TXGXTXG</cell>
+		<cell>TXGXTXT</cell>
+		<cell>TXTXGXT</cell>
+		<cell>TXTXTXG</cell>
+	</probe>
+	<probe pattern="NXNXNN">
+		<cell>AXAXCT</cell>
+		<cell>AXCXGT</cell>
+		<cell>AXTXGG</cell>
+		<cell>GXAXAG</cell>
+		<cell>GXTXGC</cell>
+		<cell>GXTXTG</cell>
+		<cell>TXGXAT</cell>
+		<cell>TXGXTA</cell>
+		<cell>TXGXTG</cell>
+		<cell>TXTXGA</cell>
+		<cell>TXTXTG</cell>
+	</probe>
+</dna>
