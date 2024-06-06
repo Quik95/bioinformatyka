@@ -2,7 +2,7 @@ import math
 import pickle
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set, Union
 
 import requests
 from lxml import etree
@@ -62,8 +62,18 @@ class HybridisationSequence:
     def __getitem__(self, item):
         return HybridisationSequence(self.sequence[item])
 
-    def __add__(self, other: "HybridisationSequence"):
+    def __add__(self, other: Union["HybridisationSequence", str]):
+        if isinstance(other, str):
+            return HybridisationSequence(self.sequence + other)
+
         return HybridisationSequence(self.sequence + other.sequence)
+
+
+@dataclass(frozen=True, eq=True)
+class GraphArc:
+    start: str
+    end: str
+    overlap: int
 
 
 @dataclass
@@ -89,6 +99,10 @@ class HybridisationInstance:
             if other_sequence_suffix + potential.sequence[-1] in self.testing_sequences:
                 return potential
 
+    def verify_extension(self, extension: GraphArc, secondary: HybridisationSequence) -> bool:
+        secondary_suffix = secondary[-len(extension.end) + extension.overlap:] + extension.end[-1]
+        return secondary_suffix in self.testing_sequences
+
     def find_best_pairing(self, primary: HybridisationSequence, secondary: HybridisationSequence) -> SortItem:
         matches = [seq for seq in HybridisationSequence.sort_matches(primary, self.pairing_sequences) if
                    seq.score is not None]
@@ -101,7 +115,7 @@ class HybridisationInstance:
 
 
 def load_from_url(
-        source: str = "https://www.cs.put.poznan.pl/pwawrzyniak/bio/bio.php?n=32&k=4&mode=alternating&intensity=0&position=0&sqpe=0&sqne=0&pose=0") -> HybridisationInstance:
+        source: str = "https://www.cs.put.poznan.pl/pwawrzyniak/bio/bio.php?n=16&k=4&mode=alternating&intensity=0&position=0&sqpe=0&sqne=0&pose=0") -> HybridisationInstance:
     r = requests.get(source)
     assert r.status_code == 200
     if not r.text.startswith("<"):
@@ -131,12 +145,59 @@ def load_instance(source: str) -> HybridisationInstance:
     )
 
 
+@dataclass
+class PartialSolution:
+    used_vertices: Set[str]
+    current_even_vertex: str
+    current_odd_vertex: str
+    odd_sequence: HybridisationSequence
+    even_sequence: HybridisationSequence
+
+    @staticmethod
+    def create_new(even_start: str, odd_start: str) -> "PartialSolution":
+        return PartialSolution(
+            used_vertices={even_start, odd_start},
+            current_even_vertex=even_start,
+            current_odd_vertex=odd_start,
+            odd_sequence=HybridisationSequence(odd_start),
+            even_sequence=HybridisationSequence(even_start),
+        )
+
+    def extend(self, even: GraphArc, odd: GraphArc) -> "PartialSolution":
+        new_odd = HybridisationSequence(odd.end) if odd.overlap == 0 and len(odd.end) > len(
+            self.odd_sequence.sequence) else self.odd_sequence + odd.end[-odd.overlap:]
+        new_even = HybridisationSequence(even.end) if even.overlap == 0 and len(even.end) > len(
+            self.even_sequence.sequence) else self.even_sequence + even.end[-even.overlap:]
+
+        return PartialSolution(
+            used_vertices=self.used_vertices.union({even.end, odd.end}),
+            current_even_vertex=even.end,
+            current_odd_vertex=odd.end,
+            odd_sequence=new_odd,
+            even_sequence=new_even,
+        )
+
+    def is_size_correct(self, target: int) -> bool:
+        return len(self.odd_sequence.sequence) + 1 == target and len(self.even_sequence.sequence) + 1 == target
+
+    def can_be_pruned(self, target: int) -> bool:
+        return len(self.odd_sequence.sequence) + 1 > target or len(self.even_sequence.sequence) + 1 > target
+
+    def recombine(self) -> str:
+        result = ""
+        for i in range(0, len(self.even_sequence.sequence), 2):
+            result += self.even_sequence.sequence[i] + self.odd_sequence.sequence[i]
+        return result
+
+
 def main():
     instance = load_from_file()
+    # instance = load_from_url()
     print("Instance loaded, beginning calculations")
 
-    even_start = instance.start[:]
-    odd_start = instance.start[1:]
+    even_start = "".join([instance.start.sequence[i] + "X" for i in range(0, len(instance.start.sequence), 2)])[:-1]
+    odd_start = "".join([instance.start.sequence[i] + "X" for i in range(1, len(instance.start.sequence), 2)])[:-1]
+    instance.pairing_sequences += [HybridisationSequence(even_start), HybridisationSequence(odd_start)]
 
     graph = defaultdict(list)
     for i in range(0, len(instance.pairing_sequences)):
@@ -146,42 +207,59 @@ def main():
             overlappings = instance.pairing_sequences[i].find_all_matches(instance.pairing_sequences[j])
             if len(overlappings) > 0:
                 for overlap in overlappings:
-                    graph[instance.pairing_sequences[i]].append((instance.pairing_sequences[j], overlap))
+                    graph[instance.pairing_sequences[i].sequence].append(
+                        GraphArc(start=instance.pairing_sequences[i].sequence,
+                                 end=instance.pairing_sequences[j].sequence,
+                                 overlap=overlap))
 
     with open("/tmp/graph.gv", "w") as f:
         f.write("digraph {\n")
         for key, value in graph.items():
             for v in value:
-                f.write(f'{key.sequence} -> {v[0].sequence} [label={v[1]}];\n')
+                f.write(f"{key} -> {v.end} [label={v.overlap}];\n")
         f.write("}")
 
-    # even_result, odd_result = instance.get_starting_sequences()
-    # instance.pairing_sequences.remove(odd_result)
-    #
-    # suffix_length = len(
-    #     instance.pairing_sequences[0].sequence) - 2
-    #
-    # while len(instance.pairing_sequences) > 0:
-    #     even_suffix = even_result[-suffix_length:]
-    #     odd_suffix = odd_result[-suffix_length:]
-    #
-    #     even_match = instance.find_best_pairing(even_suffix, odd_suffix)
-    #     instance.pairing_sequences.remove(even_match.sequence)
-    #
-    #     odd_match = instance.find_best_pairing(odd_suffix, even_suffix)
-    #     instance.pairing_sequences.remove(odd_match.sequence)
-    #
-    #     assert even_match.score == odd_match.score
-    #
-    #     even_result = even_result + even_match.sequence[-2:]
-    #     odd_result = odd_result + odd_match.sequence[-2:]
-    #
-    # assert len(even_result.sequence) == len(odd_result.sequence)
-    # result = ""
-    # for i in range(0, len(even_result.sequence), 2):
-    #     result += even_result.sequence[i] + odd_result.sequence[i]
-    #
-    # print(result)
+    solutions = []
+    processing_queue = [PartialSolution.create_new(even_start, odd_start)]
+    while len(processing_queue) > 0:
+        current = processing_queue.pop(0)
+        if current.can_be_pruned(instance.target_length):
+            continue
+
+        if current.is_size_correct(instance.target_length):
+            if len(current.odd_sequence.sequence) == len(current.even_sequence.sequence):
+                solutions.append(current)
+                continue
+
+        even_candidates = [arc for arc in graph[current.current_even_vertex] if arc.end not in current.used_vertices]
+        odd_candidates = [arc for arc in graph[current.current_odd_vertex] if
+                          arc.end not in current.used_vertices and arc not in even_candidates]
+
+        for even_candidate in even_candidates:
+            break_loop = False
+            # current verification is incorrect, rework it next
+            if (even_candidate.overlap == 2
+                    and current.current_odd_vertex[2:] + even_candidate.end[-1] in instance.testing_sequences):
+                # if we can verify the shortest possible sequence, we can't add any other vertices as they are sure to
+                # be invalid, however, if we can't verify the shortest possible sequence, can't discard it as it might
+                # be a part of a valid sequence but its verifying sequence is missing due to presence of negative errors
+                break_loop = True  # try to add the even candidate and then break the loop
+            for odd_candidate in odd_candidates:
+                new_solution = current.extend(even_candidate, odd_candidate)
+                processing_queue.append(new_solution)
+
+                if odd_candidate.overlap == 2:
+                    if current.current_even_vertex[2:] + odd_candidate.end[-1] not in instance.testing_sequences:
+                        # verification failed, continue
+                        processing_queue.pop()
+                        continue
+                    else:
+                        break
+
+            if break_loop:
+                break
+    solutions[0].recombine()
+    pass
 
 
 if __name__ == "__main__":
