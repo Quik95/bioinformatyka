@@ -115,7 +115,7 @@ class HybridisationInstance:
 
 
 def load_from_url(
-        source: str = "https://www.cs.put.poznan.pl/pwawrzyniak/bio/bio.php?n=16&k=4&mode=alternating&intensity=0&position=0&sqpe=0&sqne=0&pose=0") -> HybridisationInstance:
+        source: str = "https://www.cs.put.poznan.pl/pwawrzyniak/bio/bio.php?n=32&k=4&mode=alternating&intensity=0&position=0&sqpe=0&sqne=5&pose=0") -> HybridisationInstance:
     r = requests.get(source)
     assert r.status_code == 200
     if not r.text.startswith("<"):
@@ -192,7 +192,7 @@ class PartialSolution:
 
 def main():
     instance = load_from_file()
-    # instance = load_from_url()
+    instance = load_from_url()
     print("Instance loaded, beginning calculations")
 
     even_start = "".join([instance.start.sequence[i] + "X" for i in range(0, len(instance.start.sequence), 2)])[:-1]
@@ -237,9 +237,9 @@ def main():
 
         for even_candidate in even_candidates:
             break_loop = False
-            # current verification is incorrect, rework it next
+            # because we have negative errors in spectrum, we can only verify sequences with maximum overlap
             if (even_candidate.overlap == 2
-                    and current.current_odd_vertex[2:] + even_candidate.end[-1] in instance.testing_sequences):
+                    and instance.verify_extension(even_candidate, current.odd_sequence)):
                 # if we can verify the shortest possible sequence, we can't add any other vertices as they are sure to
                 # be invalid, however, if we can't verify the shortest possible sequence, can't discard it as it might
                 # be a part of a valid sequence but its verifying sequence is missing due to presence of negative errors
@@ -249,7 +249,7 @@ def main():
                 processing_queue.append(new_solution)
 
                 if odd_candidate.overlap == 2:
-                    if current.current_even_vertex[2:] + odd_candidate.end[-1] not in instance.testing_sequences:
+                    if instance.verify_extension(odd_candidate, new_solution.even_sequence):
                         # verification failed, continue
                         processing_queue.pop()
                         continue
@@ -258,8 +258,8 @@ def main():
 
             if break_loop:
                 break
-    solutions[0].recombine()
     pass
+    # assert len([sol.recombine() == "TATTTGGATAGCTGTG" for sol in solutions]) > 0
 
 
 if __name__ == "__main__":
