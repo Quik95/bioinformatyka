@@ -1,5 +1,7 @@
+import heapq
 import math
 import pickle
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Set, Union
@@ -8,56 +10,9 @@ import requests
 from lxml import etree
 
 
-@dataclass
-class SortItem:
-    sequence: "HybridisationSequence"
-    score: int
-
-
 @dataclass(frozen=True, eq=True)
 class HybridisationSequence:
     sequence: str
-
-    def find_all_matches(self, other: "HybridisationSequence") -> List[int]:
-        """ Finds all indexes where two sequences begin to match """
-        matches = []
-        for i in range(0, len(self.sequence), 2):
-            match = True
-            for j, nucl in enumerate(self.sequence[i:]):
-                if j >= len(other.sequence):
-                    break
-                if nucl == "X" or other.sequence[j] == "X":
-                    continue
-                if nucl != other.sequence[j]:
-                    match = False
-                    break
-            if match:
-                matches.append(i)
-        return matches
-
-    def find_match(self, other: "HybridisationSequence") -> Optional[int]:
-        """ Finds the index where two sequences begin to match """
-        for i in range(0, len(self.sequence), 2):
-            match = True
-            for j, nucl in enumerate(self.sequence[i:]):
-                if j >= len(other.sequence):
-                    break
-                if nucl == "X" or other.sequence[j] == "X":
-                    continue
-                if nucl != other.sequence[j]:
-                    match = False
-                    break
-            if match:
-                return i
-        return None
-
-    @staticmethod
-    def sort_matches(needle: "HybridisationSequence", haystack: List["HybridisationSequence"]) \
-            -> List[SortItem]:
-        return sorted(
-            [SortItem(seq, HybridisationSequence(needle.sequence).find_match(seq)) for seq in haystack],
-            key=lambda x: x.score if x.score is not None else math.inf
-        )
 
     def __getitem__(self, item):
         return HybridisationSequence(self.sequence[item])
@@ -68,12 +23,32 @@ class HybridisationSequence:
 
         return HybridisationSequence(self.sequence + other.sequence)
 
+    def __len__(self) -> int:
+        return len(self.sequence)
+
+    def _overlap(self, other: "HybridisationSequence") -> bool:
+        assert self[0] != "X" and other[0] != "X"
+        return [c for c in self.sequence if c != "X"] == [c for c in other.sequence[:len(self)] if c != "X"]
+
+    def get_overlaps(self, other: "HybridisationSequence") -> List[int]:
+        overlaps = []
+        for i in range(0, len(self), 2):
+            if self[i:]._overlap(other):
+                overlaps.append(i // 2)
+
+        # Due to malformed input, the even starting vertex always is smaller than the rest by two characters
+        # if that is the case, we add one two each overlap to account for that
+        if len(other) - len(self) == 2:
+            overlaps = [o + 1 for o in overlaps]
+
+        return overlaps
+
 
 @dataclass(frozen=True, eq=True)
 class GraphArc:
-    start: str
-    end: str
-    overlap: int
+    start: HybridisationSequence
+    end: HybridisationSequence
+    weight: int
 
 
 @dataclass
@@ -81,185 +56,177 @@ class HybridisationInstance:
     start: HybridisationSequence
     target_length: int
     pairing_sequences: List[HybridisationSequence]
-    testing_sequences: List[HybridisationSequence]
+    testing_sequences: Set[HybridisationSequence]
+    l: int
 
-    def get_starting_sequences(self) -> Tuple[HybridisationSequence, HybridisationSequence]:
-        even_starts = HybridisationSequence.sort_matches(self.start, self.pairing_sequences)
-        assert even_starts[1].score != 0
-        even_start = even_starts[0].sequence
+    @staticmethod
+    def load_from_generator(n: int = 32, k: int = 4, sqnep: int = 0) -> "HybridisationInstance":
+        url = f"https://www.cs.put.poznan.pl/pwawrzyniak/bio/bio.php?n={n}&k={k}&mode=alternating&intensity=0&position=0&sqpe=0&sqnep={sqnep}&pose=0"
+        r = requests.get(url)
+        assert r.status_code == 200
+        if not r.text.startswith("<"):
+            raise ValueError("Invalid response", r.text)
 
-        odd_starts = HybridisationSequence.sort_matches(self.start[1:], self.pairing_sequences)
-        assert odd_starts[1].score != 0
-        odd_start = odd_starts[0].sequence
+        return HybridisationInstance._load_instance(r.text)
 
-        return even_start, odd_start
+    @staticmethod
+    def load_from_file(source: str = "./small.xml") -> "HybridisationInstance":
+        with open(source, "r") as f:
+            return HybridisationInstance._load_instance(f.read())
 
-    def test_found_matches(self, matches: List[SortItem], other_sequence_suffix: HybridisationSequence) -> SortItem:
-        for potential in matches:
-            if other_sequence_suffix + potential.sequence[-1] in self.testing_sequences:
-                return potential
+    @staticmethod
+    def _load_instance(source: str) -> "HybridisationInstance":
+        root = etree.fromstring(source)
 
-    def verify_extension(self, extension: GraphArc, secondary: HybridisationSequence) -> bool:
-        secondary_suffix = secondary[-len(extension.end) + extension.overlap:] + extension.end[-1]
-        return secondary_suffix in self.testing_sequences
+        start = HybridisationSequence(root.get("start"))
+        target_length = int(root.get("length"))
+        pairing_sequences = [HybridisationSequence(el.text) for el in root.getchildren()[0]]
+        testing_sequences = set([HybridisationSequence(el.text) for el in root.getchildren()[1]])
 
-    def find_best_pairing(self, primary: HybridisationSequence, secondary: HybridisationSequence) -> SortItem:
-        matches = [seq for seq in HybridisationSequence.sort_matches(primary, self.pairing_sequences) if
-                   seq.score is not None]
-        assert len(matches) > 0
-        best_match = matches[0]
-        if len([seq for seq in matches if seq.score == 0]) > 1:
-            # there is more than one perfect match
-            best_match = self.test_found_matches(matches, secondary)
-        return best_match
+        return HybridisationInstance(
+            start=start,
+            target_length=target_length,
+            pairing_sequences=pairing_sequences,
+            testing_sequences=testing_sequences,
+            l=len(start)
+        )
 
+    def get_staring_vertices(self) -> Tuple[HybridisationSequence, HybridisationSequence]:
+        return (
+            HybridisationSequence("".join([self.start.sequence[i] + "X" for i in range(0, len(self.start), 2)])[:-1]),
+            HybridisationSequence("".join([self.start.sequence[i] + "X" for i in range(1, len(self.start), 2)]))[:-1])
 
-def load_from_url(
-        source: str = "https://www.cs.put.poznan.pl/pwawrzyniak/bio/bio.php?n=32&k=4&mode=alternating&intensity=0&position=0&sqpe=0&sqne=5&pose=0") -> HybridisationInstance:
-    r = requests.get(source)
-    assert r.status_code == 200
-    if not r.text.startswith("<"):
-        raise ValueError("Invalid response", r.text)
+    def verify_vertex(self, candidate: HybridisationSequence, complementary: HybridisationSequence) -> bool:
+        return complementary[2:len(complementary) - 1] + candidate[-1] in self.testing_sequences
 
-    return load_instance(r.text)
+    def is_solution_complete(self, solution: "PartialSolution") -> bool:
+        return len(solution.odd_sequence) + 1 == self.target_length and len(
+            solution.even_sequence) + 1 == self.target_length
 
-
-def load_from_file(source: str = "./small.xml") -> HybridisationInstance:
-    with open(source, "r") as f:
-        return load_instance(f.read())
-
-
-def load_instance(source: str) -> HybridisationInstance:
-    root = etree.fromstring(source)
-
-    start = HybridisationSequence(root.get("start"))
-    target_length = int(root.get("length"))
-    pairing_sequences = [HybridisationSequence(el.text) for el in root.getchildren()[0]]
-    testing_sequences = [HybridisationSequence(el.text) for el in root.getchildren()[1]]
-
-    return HybridisationInstance(
-        start=start,
-        target_length=target_length,
-        pairing_sequences=pairing_sequences,
-        testing_sequences=testing_sequences
-    )
+    def can_be_pruned(self, solution: "PartialSolution") -> bool:
+        return len(solution.odd_sequence) + 1 > self.target_length or len(
+            solution.even_sequence) + 1 > self.target_length
 
 
-@dataclass
 class PartialSolution:
-    used_vertices: Set[str]
-    current_even_vertex: str
-    current_odd_vertex: str
+    visited_vertices: Set[HybridisationSequence]
     odd_sequence: HybridisationSequence
     even_sequence: HybridisationSequence
 
-    @staticmethod
-    def create_new(even_start: str, odd_start: str) -> "PartialSolution":
-        return PartialSolution(
-            used_vertices={even_start, odd_start},
-            current_even_vertex=even_start,
-            current_odd_vertex=odd_start,
-            odd_sequence=HybridisationSequence(odd_start),
-            even_sequence=HybridisationSequence(even_start),
-        )
+    def __init__(self, visited_vertices: Set[HybridisationSequence], odd_sequence: HybridisationSequence,
+                 even_sequence: HybridisationSequence):
+        self.visited_vertices = visited_vertices
+        self.odd_sequence = odd_sequence
+        self.even_sequence = even_sequence
 
-    def extend(self, even: GraphArc, odd: GraphArc) -> "PartialSolution":
-        new_odd = HybridisationSequence(odd.end) if odd.overlap == 0 and len(odd.end) > len(
-            self.odd_sequence.sequence) else self.odd_sequence + odd.end[-odd.overlap:]
-        new_even = HybridisationSequence(even.end) if even.overlap == 0 and len(even.end) > len(
-            self.even_sequence.sequence) else self.even_sequence + even.end[-even.overlap:]
+    def extend(self, odd_arc: GraphArc, even_arc: GraphArc) -> "PartialSolution":
+        new_visited = self.visited_vertices.union({odd_arc.end, even_arc.end})
+        new_odd = self.odd_sequence + odd_arc.end[-odd_arc.weight * 2:]
+        new_even = self.even_sequence + even_arc.end[-even_arc.weight * 2:]
 
-        return PartialSolution(
-            used_vertices=self.used_vertices.union({even.end, odd.end}),
-            current_even_vertex=even.end,
-            current_odd_vertex=odd.end,
-            odd_sequence=new_odd,
-            even_sequence=new_even,
-        )
+        return PartialSolution(new_visited, new_odd, new_even)
 
-    def is_size_correct(self, target: int) -> bool:
-        return len(self.odd_sequence.sequence) + 1 == target and len(self.even_sequence.sequence) + 1 == target
+    def current_vertices(self, l: int) -> Tuple[HybridisationSequence, HybridisationSequence]:
+        return self.odd_sequence[-l:], self.even_sequence[-max(0, l):]
 
-    def can_be_pruned(self, target: int) -> bool:
-        return len(self.odd_sequence.sequence) + 1 > target or len(self.even_sequence.sequence) + 1 > target
-
-    def recombine(self) -> str:
+    def reconstruct(self) -> str:
         result = ""
-        for i in range(0, len(self.even_sequence.sequence), 2):
-            result += self.even_sequence.sequence[i] + self.odd_sequence.sequence[i]
+        for i in range(0, len(self.odd_sequence), 2):
+            result += self.odd_sequence.sequence[i] + self.even_sequence.sequence[i]
         return result
 
 
+class HeapItem:
+    def __init__(self, item: PartialSolution):
+        self.priority = -len(item.visited_vertices)
+        self.item = item
+
+    def value(self) -> PartialSolution:
+        return self.item
+
+    def __lt__(self, other):
+        return self.priority < other.priority
+
+    def __eq__(self, other):
+        return self.priority == other.priority
+
+
 def main():
-    instance = load_from_file()
-    instance = load_from_url()
+    # instance = HybridisationInstance.load_from_file()
+    instance = HybridisationInstance.load_from_generator(n=1000, k=10, sqnep=1)
     print("Instance loaded, beginning calculations")
 
-    even_start = "".join([instance.start.sequence[i] + "X" for i in range(0, len(instance.start.sequence), 2)])[:-1]
-    odd_start = "".join([instance.start.sequence[i] + "X" for i in range(1, len(instance.start.sequence), 2)])[:-1]
-    instance.pairing_sequences += [HybridisationSequence(even_start), HybridisationSequence(odd_start)]
-
+    odd_start, even_start = instance.get_staring_vertices()
     graph = defaultdict(list)
-    for i in range(0, len(instance.pairing_sequences)):
-        for j in range(0, len(instance.pairing_sequences)):
-            if i == j:
-                continue
-            overlappings = instance.pairing_sequences[i].find_all_matches(instance.pairing_sequences[j])
-            if len(overlappings) > 0:
-                for overlap in overlappings:
-                    graph[instance.pairing_sequences[i].sequence].append(
-                        GraphArc(start=instance.pairing_sequences[i].sequence,
-                                 end=instance.pairing_sequences[j].sequence,
-                                 overlap=overlap))
+
+    p = instance.pairing_sequences + [odd_start,
+                                      even_start] if odd_start not in instance.pairing_sequences else instance.pairing_sequences + [
+        even_start]
+    for start in p:
+        for end in instance.pairing_sequences:
+            if start != end:
+                for overlap in start.get_overlaps(end):
+                    graph[start].append(GraphArc(start, end, overlap))
+
+    for start, arcs in graph.items():
+        graph[start] = sorted(arcs, key=lambda x: x.weight)
 
     with open("/tmp/graph.gv", "w") as f:
-        f.write("digraph {\n")
-        for key, value in graph.items():
-            for v in value:
-                f.write(f"{key} -> {v.end} [label={v.overlap}];\n")
+        f.write("digraph G {\n")
+        for start, arcs in graph.items():
+            start_label = f"odd start\n{start.sequence}" if start == odd_start else start.sequence
+            start_label = f"even start\n{start.sequence}" if start == even_start else start_label
+            for arc in arcs:
+                f.write(
+                    f'"{start_label}" -> "{arc.end.sequence}" [label="{arc.weight}"] [color="{"red" if arc.weight == 1 else "black"}"];\n')
         f.write("}")
 
-    solutions = []
-    processing_queue = [PartialSolution.create_new(even_start, odd_start)]
-    while len(processing_queue) > 0:
-        current = processing_queue.pop(0)
-        if current.can_be_pruned(instance.target_length):
-            continue
+    print("Graph created, beginning calculations")
+    initial = PartialSolution({odd_start, even_start}, odd_sequence=odd_start, even_sequence=even_start)
 
-        if current.is_size_correct(instance.target_length):
-            if len(current.odd_sequence.sequence) == len(current.even_sequence.sequence):
-                solutions.append(current)
+    queue = [HeapItem(initial)]
+    heapq.heapify(queue)
+
+    solutions = []
+    timelimit = time.time() + 60 * 2  # 2 minutes
+    while len(queue) > 0:
+        if time.time() > timelimit:
+            print("Time limit exceeded")
+            break
+
+        current = heapq.heappop(queue).value()
+        current_odd_vertex, current_even_vertex = current.current_vertices(len(instance.start))
+
+        odd_candidates = [arc for arc in graph[current_odd_vertex] if arc.end not in current.visited_vertices]
+        even_candidates = [arc for arc in graph[current_even_vertex] if
+                           arc.end not in current.visited_vertices and arc.end not in odd_candidates]
+
+        for odd_arc in odd_candidates:
+            if (odd_arc.weight == 1
+                    and current_even_vertex != even_start  # Due to malformed input, in the first iteration the correct vertex would be rejected
+                    and not instance.verify_vertex(odd_arc.end, current_even_vertex)):
                 continue
 
-        even_candidates = [arc for arc in graph[current.current_even_vertex] if arc.end not in current.used_vertices]
-        odd_candidates = [arc for arc in graph[current.current_odd_vertex] if
-                          arc.end not in current.used_vertices and arc not in even_candidates]
+            for even_arc in even_candidates:
+                if even_arc.weight == 1 and not instance.verify_vertex(even_arc.end, current_odd_vertex):
+                    continue
 
-        for even_candidate in even_candidates:
-            break_loop = False
-            # because we have negative errors in spectrum, we can only verify sequences with maximum overlap
-            if (even_candidate.overlap == 2
-                    and instance.verify_extension(even_candidate, current.odd_sequence)):
-                # if we can verify the shortest possible sequence, we can't add any other vertices as they are sure to
-                # be invalid, however, if we can't verify the shortest possible sequence, can't discard it as it might
-                # be a part of a valid sequence but its verifying sequence is missing due to presence of negative errors
-                break_loop = True  # try to add the even candidate and then break the loop
-            for odd_candidate in odd_candidates:
-                new_solution = current.extend(even_candidate, odd_candidate)
-                processing_queue.append(new_solution)
+                new_solution = current.extend(odd_arc, even_arc)
+                if instance.is_solution_complete(new_solution):
+                    solutions.append(new_solution)
+                elif not instance.can_be_pruned(new_solution):
+                    heapq.heappush(queue, HeapItem(new_solution))
 
-                if odd_candidate.overlap == 2:
-                    if instance.verify_extension(odd_candidate, new_solution.even_sequence):
-                        # verification failed, continue
-                        processing_queue.pop()
-                        continue
-                    else:
-                        break
+                # If we got here and the arc has weight 1, that means that it was verified and there can't any better solutions
+                if even_arc.weight == 1:
+                    break
 
-            if break_loop:
+            # If we got here and the arc has weight 1, that means that it was verified and there can't any better solutions
+            if odd_arc.weight == 1:
                 break
+
+    print(f"Calculations finished. Number of unique solutions found: {len(set([s.reconstruct() for s in solutions]))}")
     pass
-    # assert len([sol.recombine() == "TATTTGGATAGCTGTG" for sol in solutions]) > 0
 
 
 if __name__ == "__main__":
